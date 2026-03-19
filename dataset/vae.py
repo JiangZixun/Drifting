@@ -46,7 +46,9 @@ def vae_enc_decode(replicate_params: bool = True):
         replicated_sharding = NamedSharding(mesh, P())
         def _replicate(x):
             x = jnp.asarray(x) if isinstance(x, np.ndarray) else x
-            return jax.make_array_from_process_local_data(replicated_sharding, x)
+            if jax.process_count() > 1:
+                return jax.make_array_from_process_local_data(replicated_sharding, x)
+            return jax.device_put(x, replicated_sharding)
 
         vae_params = jax.tree.map(_replicate, vae_params)
     else:

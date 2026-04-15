@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-os.environ.setdefault("JAX_PLATFORMS", "tpu,cpu")
+os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
 
 import jax
 import jax.numpy as jnp
@@ -108,12 +108,12 @@ def create_cached_dataset(
     from dataset.vae import vae_enc_decode
     from utils.hsdp_util import set_global_mesh
 
-    local_tpu_devices = jax.local_devices(backend="tpu")
-    n_local_devices = max(1, len(local_tpu_devices))
+    local_devices = jax.local_devices()
+    n_local_devices = max(1, len(local_devices))
 
     if local_batch_size % n_local_devices != 0:
         raise ValueError(
-            f"`local_batch_size` must be divisible by local TPU device count={n_local_devices}, got {local_batch_size}."
+            f"`local_batch_size` must be divisible by local JAX device count={n_local_devices}, got {local_batch_size}."
         )
 
     set_global_mesh(min(8, n_local_devices * jax.process_count()))
@@ -122,11 +122,11 @@ def create_cached_dataset(
     if jax.process_count() > 1:
         mu.sync_global_devices("latent cache target dirs ready")
 
-    # Reuse the training-style replicated TPU params path so all local devices
+    # Reuse the training-style replicated params path so all local devices
     # can participate in the cache build.
     encode_fn, _ = vae_enc_decode(replicate_params=True)
 
-    local_mesh = Mesh(np.array(local_tpu_devices), axis_names=("data",))
+    local_mesh = Mesh(np.array(local_devices), axis_names=("data",))
     sample_sharding = NamedSharding(local_mesh, P("data", None, None, None))
     rng_sharding = NamedSharding(local_mesh, P("data", None))
     output_sharding = NamedSharding(local_mesh, P("data", None, None, None))

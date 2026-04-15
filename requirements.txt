@@ -1,17 +1,17 @@
--f https://storage.googleapis.com/jax-releases/libtpu_releases.html
---extra-index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cu128
 
-jax[tpu]==0.4.37
-jaxlib==0.4.36
+# CUDA 12.8 / RTX 5090 D / mirrors the working conda env `dinov2`
+jax[cuda12]==0.6.2
 flax==0.10.4
 optax==0.2.5
 orbax-checkpoint==0.11.0
-numpy<2
+numpy==2.2.6
 ml-dtypes==0.5.4
 tensorstore==0.1.78
 
-torch==2.4.0+cpu
-torchvision==0.19.0+cpu
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+torchaudio==2.10.0+cu128
 
 diffusers==0.37.0
 transformers==5.3.0

@@ -9,15 +9,17 @@ import jax
 _vae_cache = {}
 
 
-def _put_tree_on_local_tpu(tree):
-    tpu_devices = jax.local_devices(backend="tpu")
-    if not tpu_devices:
-        raise RuntimeError("No local TPU devices available for VAE params.")
-    target_device = tpu_devices[0]
-    def _to_local_tpu(x):
+def _put_tree_on_local_device(tree):
+    local_devices = jax.local_devices()
+    if not local_devices:
+        raise RuntimeError("No local JAX devices available for VAE params.")
+    target_device = local_devices[0]
+
+    def _to_local_device(x):
         host_value = np.asarray(x) if isinstance(x, (np.ndarray, jax.Array)) else x
         return jax.device_put(host_value, target_device)
-    return jax.tree.map(_to_local_tpu, tree)
+
+    return jax.tree.map(_to_local_device, tree)
 
 
 def vae_enc_decode(replicate_params: bool = True):
@@ -27,7 +29,7 @@ def vae_enc_decode(replicate_params: bool = True):
         decode_fn: a function that takes in (B, H, W, C) and returns (B, C, H, W)
 
     Args:
-        replicate_params: If True, replicate VAE params across all TPU devices for efficient inference
+        replicate_params: If True, replicate VAE params across all visible JAX devices for efficient inference
     
     Note: Results are cached to avoid reloading the VAE model on repeated calls.
     '''
@@ -52,7 +54,7 @@ def vae_enc_decode(replicate_params: bool = True):
 
         vae_params = jax.tree.map(_replicate, vae_params)
     else:
-        vae_params = _put_tree_on_local_tpu(vae_params)
+        vae_params = _put_tree_on_local_device(vae_params)
 
     def _encode_fn(images, rng, params):
         dist = vae.apply({'params': params}, images, method=FlaxAutoencoderKL.encode).latent_dist

@@ -1,10 +1,10 @@
 {
   "seed": 0,
-  "output_dir": "/mnt/data1/Drifting/experiments/cloudseg_unet_drifting",
+  "output_dir": "/opt/data/private/Drifting/experiments/cloudseg_unet_drifting",
   "num_classes": 10,
   "ignore_index": 10,
   "data": {
-    "root": "/mnt/data1/Dataset/CloudSegmentation",
+    "root": "/opt/data/private/Dataset/CloudSegmentation",
     "train_split": "train1",
     "val_split": "val1",
     "pad_to_size": null,
@@ -64,7 +64,7 @@
     "dice_weight": 0.5
   },
   "drift": {
-    "weight": 0.1,
+    "weight": 0.03,
     "positive_bank_size": 192,
     "negative_bank_size": 1536,
     "pos_per_class": 6,

@@ -230,6 +230,62 @@ class OfficialUNet(nn.Module):
         return logits
 
 
+class DriftingUNet(nn.Module):
+    input_channels: int = 17
+    num_classes: int = 10
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool = True, *, return_features: bool = False):
+        train = not deterministic
+
+        stage_1 = _DoubleConv(32, 64, 64, name="stage_1")(x, train=train)
+        stage_2_in = nn.max_pool(stage_1, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_2 = _DoubleConv(128, 128, name="stage_2")(stage_2_in, train=train)
+
+        stage_3_in = nn.max_pool(stage_2, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_3 = _DoubleConv(256, 256, name="stage_3")(stage_3_in, train=train)
+
+        stage_4_in = nn.max_pool(stage_3, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_4 = _DoubleConv(512, 512, name="stage_4")(stage_4_in, train=train)
+
+        bottleneck_in = nn.max_pool(stage_4, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        bottleneck = _DoubleConv(1024, 1024, name="stage_5")(bottleneck_in, train=train)
+
+        up_4 = nn.ConvTranspose(512, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_4")(bottleneck)
+        up_4 = jnp.concatenate([up_4, stage_4], axis=-1)
+        up_4 = _DoubleConv(512, 512, name="stage_up_4")(up_4, train=train)
+
+        up_3 = nn.ConvTranspose(256, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_3")(up_4)
+        up_3 = jnp.concatenate([up_3, stage_3], axis=-1)
+        up_3 = _DoubleConv(256, 256, name="stage_up_3")(up_3, train=train)
+
+        up_2 = nn.ConvTranspose(128, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_2")(up_3)
+        up_2 = jnp.concatenate([up_2, stage_2], axis=-1)
+        up_2 = _DoubleConv(128, 128, name="stage_up_2")(up_2, train=train)
+
+        up_1 = nn.ConvTranspose(64, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_1")(up_2)
+        up_1 = jnp.concatenate([up_1, stage_1], axis=-1)
+        up_1 = _DoubleConv(64, 64, name="stage_up_1")(up_1, train=train)
+
+        logits = nn.Conv(self.num_classes, kernel_size=(3, 3), padding="SAME", name="final")(up_1)
+
+        if not return_features:
+            return logits
+
+        return {
+            "logits": logits,
+            "features": {
+                "enc2": stage_2,
+                "enc3": stage_3,
+                "enc4": stage_4,
+                "bottleneck": bottleneck,
+                "dec3": up_3,
+                "dec2": up_2,
+                "dec1": up_1,
+            },
+        }
+
+
 def extract_backbone_config(metadata: Dict[str, Any]) -> Dict[str, Any]:
     model_cfg = dict(metadata.get("model_config", {}) or {})
     use_bf16 = bool(model_cfg.get("use_bf16", False))

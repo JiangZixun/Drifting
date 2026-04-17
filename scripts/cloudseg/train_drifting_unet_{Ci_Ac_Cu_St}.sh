@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONFIG_PATH="$ROOT_DIR/scripts/cloudseg/configs/unet_drifting_all_class.json"
-EXP_NAME="cloudseg_unet_drifting/all_class"
+CONFIG_PATH="$ROOT_DIR/scripts/cloudseg/configs/unet_drifting_{Ci_Ac_Cu_St}.json"
+EXP_NAME="cloudseg_unet_drifting/Ci_Ac_Cu_St"
 RESUME_PATH=""
 OUTPUT_DIR="${ROOT_DIR}/experiments/${EXP_NAME}"
 

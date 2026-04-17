@@ -377,7 +377,7 @@ def build_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         drop_last=True,
-        pin_memory=True,
+        pin_memory=False,
     )
     val_loader = DataLoader(
         val_ds,
@@ -385,6 +385,6 @@ def build_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         drop_last=False,
-        pin_memory=True,
+        pin_memory=False,
     )
     return train_loader, val_loader, train_ds, val_ds

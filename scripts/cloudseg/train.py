@@ -343,6 +343,8 @@ def main():
         ignore_index=cfg["ignore_index"],
         pad_to_size=cfg["data"].get("pad_to_size"),
         normalization=cfg["data"].get("normalization"),
+        input_channel_indices=cfg["data"].get("input_channel_indices"),
+        feature_augmentation=cfg["data"].get("feature_augmentation"),
     )
 
     print("[cloudseg] preparing sample batch for shape inference...", flush=True)

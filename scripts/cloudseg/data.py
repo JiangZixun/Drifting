@@ -111,6 +111,44 @@ class ChannelNormalizer:
         return torch.from_numpy(image)
 
 
+def _resolve_gradient_normalization(config: Optional[Dict]) -> Dict:
+    if config is None:
+        return {"mode": "sample_minmax", "clip": True}
+    return dict(config)
+
+
+def _conv2d_same(channel: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    height, width = channel.shape
+    padded = np.pad(channel, ((1, 1), (1, 1)), mode="edge")
+    output = np.zeros((height, width), dtype=np.float32)
+    for row in range(3):
+        for col in range(3):
+            output += kernel[row, col] * padded[row : row + height, col : col + width]
+    return output
+
+
+def _sobel_gradients(channel: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    kernel_x = np.asarray(
+        [
+            [-1.0, 0.0, 1.0],
+            [-2.0, 0.0, 2.0],
+            [-1.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    kernel_y = np.asarray(
+        [
+            [-1.0, -2.0, -1.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    grad_x = _conv2d_same(channel, kernel_x)
+    grad_y = _conv2d_same(channel, kernel_y)
+    return grad_x, grad_y
+
+
 class Compose:
     def __init__(self, transforms):
         self.transforms = transforms
@@ -268,6 +306,8 @@ class CloudSegmentationDataset(Dataset):
         ignore_index: int = 10,
         class_names: Optional[List[str]] = None,
         normalization: Optional[Dict] = None,
+        input_channel_indices: Optional[List[int]] = None,
+        feature_augmentation: Optional[Dict] = None,
         transforms=None,
     ):
         self.files: Sequence[str] = []
@@ -296,6 +336,58 @@ class CloudSegmentationDataset(Dataset):
             "dataset_max": list(DEFAULT_MINMAX_17["max"]),
         }
         self.image_normalizer = ChannelNormalizer(NormalizationConfig(**norm_cfg))
+        self.input_channel_indices = None
+        if input_channel_indices is not None:
+            self.input_channel_indices = [int(channel_idx) for channel_idx in input_channel_indices]
+        self.feature_augmentation = dict(feature_augmentation or {})
+        gradient_cfg = dict(self.feature_augmentation.get("gradient", {}) or {})
+        self.gradient_enabled = bool(gradient_cfg.get("enabled", False))
+        self.gradient_skip_channel_indices = {
+            int(channel_idx) for channel_idx in gradient_cfg.get("skip_channel_indices", [])
+        }
+        self.gradient_mode = str(gradient_cfg.get("mode", "magnitude"))
+        self.gradient_operator = str(gradient_cfg.get("operator", "sobel"))
+        self.gradient_normalizer = ChannelNormalizer(
+            NormalizationConfig(**_resolve_gradient_normalization(gradient_cfg.get("normalization")))
+        )
+
+    def _select_input_channels(self, image: np.ndarray) -> np.ndarray:
+        if self.input_channel_indices is None:
+            return image
+        return image[self.input_channel_indices]
+
+    def _build_gradient_features(self, image: np.ndarray) -> np.ndarray:
+        if not self.gradient_enabled:
+            return image
+
+        gradient_features = []
+        for channel_idx in range(image.shape[0]):
+            if channel_idx in self.gradient_skip_channel_indices:
+                continue
+            channel = image[channel_idx]
+            if self.gradient_operator == "sobel":
+                grad_x, grad_y = _sobel_gradients(channel)
+            elif self.gradient_operator == "numpy_gradient":
+                grad_y, grad_x = np.gradient(channel)
+                grad_x = grad_x.astype(np.float32, copy=False)
+                grad_y = grad_y.astype(np.float32, copy=False)
+            else:
+                raise ValueError(f"Unsupported gradient operator: {self.gradient_operator}")
+
+            if self.gradient_mode == "dxdy":
+                gradient_features.extend([grad_x, grad_y])
+            elif self.gradient_mode == "magnitude":
+                gradient = np.sqrt(np.square(grad_x) + np.square(grad_y)).astype(np.float32, copy=False)
+                gradient_features.append(gradient)
+            else:
+                raise ValueError(f"Unsupported gradient feature mode: {self.gradient_mode}")
+
+        if not gradient_features:
+            return image
+
+        gradient_array = np.stack(gradient_features, axis=0).astype(np.float32, copy=False)
+        gradient_array = self.gradient_normalizer(gradient_array).numpy()
+        return np.concatenate([image, gradient_array], axis=0)
 
     def __len__(self) -> int:
         if self.mmap_store is not None:
@@ -322,8 +414,10 @@ class CloudSegmentationDataset(Dataset):
 
         if self.transforms is not None:
             image, mask = self.transforms(image, mask)
-        image = self.image_normalizer(image)
-        image = torch.clamp(image, min=0.0)
+        image = self.image_normalizer(image).numpy()
+        image = self._select_input_channels(image)
+        image = self._build_gradient_features(image)
+        image = torch.from_numpy(image)
         mask = torch.from_numpy(mask.copy()).long()
         invalid = (mask < 0) | (mask >= self.num_classes)
         mask[invalid] = self.ignore_index
@@ -357,18 +451,24 @@ def build_dataloaders(
     num_workers: int = 4,
     ignore_index: int = 10,
     normalization: Optional[Dict] = None,
+    input_channel_indices: Optional[List[int]] = None,
+    feature_augmentation: Optional[Dict] = None,
     pad_to_size: Optional[int] = None,
 ):
     train_ds = CloudSegmentationDataset(
         os.path.join(data_root, train_split),
         ignore_index=ignore_index,
         normalization=normalization,
+        input_channel_indices=input_channel_indices,
+        feature_augmentation=feature_augmentation,
         transforms=make_transforms(train=True, pad_to_size=pad_to_size, ignore_index=ignore_index),
     )
     val_ds = CloudSegmentationDataset(
         os.path.join(data_root, val_split),
         ignore_index=ignore_index,
         normalization=normalization,
+        input_channel_indices=input_channel_indices,
+        feature_augmentation=feature_augmentation,
         transforms=make_transforms(train=False, pad_to_size=pad_to_size, ignore_index=ignore_index),
     )
     train_loader = DataLoader(

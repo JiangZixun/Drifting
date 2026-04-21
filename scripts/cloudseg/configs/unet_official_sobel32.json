@@ -1,0 +1,115 @@
+{
+  "seed": 0,
+  "output_dir": "/mnt/data1/Drifting/experiments/cloudseg_unet_official_sobel32",
+  "num_classes": 10,
+  "ignore_index": 10,
+  "train_backbone": true,
+  "data": {
+    "root": "/mnt/data1/Dataset/CloudSegmentation",
+    "train_split": "train1",
+    "val_split": "val1",
+    "pad_to_size": null,
+    "input_channel_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16
+    ],
+    "normalization": {
+      "mode": "dataset_minmax",
+      "dataset_min": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        207.1699981689453,
+        187.04998779296875,
+        183.6999969482422,
+        183.8599853515625,
+        182.22999572753906,
+        208.33999633789062,
+        183.83999633789062,
+        181.66000366210938,
+        181.54998779296875,
+        184.88999938964844
+      ],
+      "dataset_max": [
+        95.37999725341797,
+        1.2105,
+        1.21420002,
+        1.19639993,
+        1.22599995,
+        1.23109996,
+        1.23199999,
+        370.76998901,
+        261.57998657,
+        271.57998657,
+        274.79998779,
+        313.61999512,
+        281.30999756,
+        317.63000488,
+        317.38998413,
+        310.6000061,
+        283.77999878
+      ],
+      "clip": true
+    },
+    "feature_augmentation": {
+      "gradient": {
+        "enabled": true,
+        "skip_channel_indices": [],
+        "operator": "sobel",
+        "mode": "magnitude",
+        "normalization": {
+          "mode": "sample_minmax",
+          "clip": true
+        }
+      }
+    }
+  },
+  "model": {
+    "type": "official_unet"
+  },
+  "optimizer": {
+    "schedule": "cosine",
+    "learning_rate": 0.0001,
+    "min_learning_rate": 1e-06,
+    "warmup_ratio": 0.05,
+    "weight_decay": 0.0001
+  },
+  "loss": {
+    "lambda_uncertainty": 0.5,
+    "ce_weight": 0.5,
+    "dice_weight": 0.5
+  },
+  "train": {
+    "epochs": 200,
+    "batch_size": 16,
+    "num_workers": 0,
+    "save_every_epochs": 50
+  },
+  "eval": {
+    "batch_size": 16,
+    "eval_every_epochs": 1
+  },
+  "wandb": {
+    "project": "drifting-cloudseg",
+    "entity": null,
+    "name": null
+  }
+}

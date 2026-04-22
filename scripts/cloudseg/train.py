@@ -208,7 +208,10 @@ def train_step(
     *,
     num_classes,
     ignore_index,
+    primary_loss,
     lambda_uncertainty,
+    focal_alpha,
+    focal_gamma,
     ce_weight,
     dice_weight,
     freeze_backbone,
@@ -227,7 +230,10 @@ def train_step(
             labels,
             num_classes=num_classes,
             ignore_index=ignore_index,
+            primary_loss=primary_loss,
             lambda_uncertainty=lambda_uncertainty,
+            focal_alpha=focal_alpha,
+            focal_gamma=focal_gamma,
             ce_weight=ce_weight,
             dice_weight=dice_weight,
         )
@@ -244,7 +250,19 @@ def train_step(
     return state, metrics, preds
 
 
-def eval_step(state, images, *, num_classes, ignore_index, lambda_uncertainty, ce_weight, dice_weight):
+def eval_step(
+    state,
+    images,
+    *,
+    num_classes,
+    ignore_index,
+    primary_loss,
+    lambda_uncertainty,
+    focal_alpha,
+    focal_gamma,
+    ce_weight,
+    dice_weight,
+):
     variables = {"params": state.params}
     if state.batch_stats is not None:
         variables["batch_stats"] = state.batch_stats
@@ -269,9 +287,12 @@ def run_train_epoch(loader, state, step_fn, *, split, cfg):
             labels,
             num_classes=cfg["num_classes"],
             ignore_index=cfg["ignore_index"],
-            lambda_uncertainty=cfg["loss"]["lambda_uncertainty"],
-            ce_weight=cfg["loss"]["ce_weight"],
-            dice_weight=cfg["loss"]["dice_weight"],
+            primary_loss=cfg["loss"].get("primary_loss", "attention_ce"),
+            lambda_uncertainty=cfg["loss"].get("lambda_uncertainty", 0.5),
+            focal_alpha=cfg["loss"].get("focal_alpha", 0.25),
+            focal_gamma=cfg["loss"].get("focal_gamma", 2.0),
+            ce_weight=cfg["loss"].get("ce_weight", cfg["loss"].get("focal_weight", 0.5)),
+            dice_weight=cfg["loss"].get("dice_weight", 0.5),
             freeze_backbone=not cfg["train_backbone"],
         )
         preds_np = np.asarray(preds)
@@ -300,9 +321,12 @@ def run_eval_epoch(loader, state, step_fn, *, split, cfg):
             images,
             num_classes=cfg["num_classes"],
             ignore_index=cfg["ignore_index"],
-            lambda_uncertainty=cfg["loss"]["lambda_uncertainty"],
-            ce_weight=cfg["loss"]["ce_weight"],
-            dice_weight=cfg["loss"]["dice_weight"],
+            primary_loss=cfg["loss"].get("primary_loss", "attention_ce"),
+            lambda_uncertainty=cfg["loss"].get("lambda_uncertainty", 0.5),
+            focal_alpha=cfg["loss"].get("focal_alpha", 0.25),
+            focal_gamma=cfg["loss"].get("focal_gamma", 2.0),
+            ce_weight=cfg["loss"].get("ce_weight", cfg["loss"].get("focal_weight", 0.5)),
+            dice_weight=cfg["loss"].get("dice_weight", 0.5),
         )
         preds_np = np.asarray(jax.device_get(jax.block_until_ready(preds)))
         conf_mat += confusion_matrix(preds_np.reshape(-1), labels_np.reshape(-1), cfg["num_classes"])
@@ -368,11 +392,30 @@ def main():
 
     train_step_jit = jax.jit(
         train_step,
-        static_argnames=("num_classes", "ignore_index", "lambda_uncertainty", "ce_weight", "dice_weight", "freeze_backbone"),
+        static_argnames=(
+            "num_classes",
+            "ignore_index",
+            "primary_loss",
+            "lambda_uncertainty",
+            "focal_alpha",
+            "focal_gamma",
+            "ce_weight",
+            "dice_weight",
+            "freeze_backbone",
+        ),
     )
     eval_step_jit = jax.jit(
         eval_step,
-        static_argnames=("num_classes", "ignore_index", "lambda_uncertainty", "ce_weight", "dice_weight"),
+        static_argnames=(
+            "num_classes",
+            "ignore_index",
+            "primary_loss",
+            "lambda_uncertainty",
+            "focal_alpha",
+            "focal_gamma",
+            "ce_weight",
+            "dice_weight",
+        ),
     )
 
     wandb_run = maybe_init_wandb(cfg, output_dir, cfg["wandb_enabled"])

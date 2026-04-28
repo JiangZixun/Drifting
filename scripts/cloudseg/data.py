@@ -124,6 +124,12 @@ def _resolve_gradient_normalization(config: Optional[Dict]) -> Dict:
     return dict(config)
 
 
+def _resolve_prior_normalization(config: Optional[Dict]) -> Dict:
+    if config is None:
+        return {"mode": "sample_minmax", "clip": True}
+    return dict(config)
+
+
 def _conv2d_same(channel: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     height, width = channel.shape
     padded = np.pad(channel, ((1, 1), (1, 1)), mode="edge")
@@ -489,6 +495,14 @@ class CloudSegmentationDataset(Dataset):
         self.gradient_normalizer = ChannelNormalizer(
             NormalizationConfig(**_resolve_gradient_normalization(gradient_cfg.get("normalization")))
         )
+        physical_prior_cfg = dict(self.feature_augmentation.get("physical_prior", {}) or {})
+        self.physical_prior_enabled = bool(physical_prior_cfg.get("enabled", False))
+        self.physical_prior_use_himawari16_from17 = bool(physical_prior_cfg.get("use_himawari16_from17", True))
+        self.physical_prior_include_inputs = bool(physical_prior_cfg.get("include_inputs", True))
+        self.physical_prior_indices = dict(physical_prior_cfg.get("indices", {}) or {})
+        self.physical_prior_normalizer = ChannelNormalizer(
+            NormalizationConfig(**_resolve_prior_normalization(physical_prior_cfg.get("normalization")))
+        )
 
     def _select_input_channels(self, image: np.ndarray) -> np.ndarray:
         if self.input_channel_indices is None:
@@ -527,6 +541,51 @@ class CloudSegmentationDataset(Dataset):
         gradient_array = np.stack(gradient_features, axis=0).astype(np.float32, copy=False)
         gradient_array = self.gradient_normalizer(gradient_array).numpy()
         return np.concatenate([image, gradient_array], axis=0)
+
+    def _idx(self, key: str, default: int) -> int:
+        return int(self.physical_prior_indices.get(key, default))
+
+    def _build_himawari16_physical_prior(self, image: np.ndarray) -> np.ndarray:
+        if not self.physical_prior_enabled:
+            return image
+
+        src = image
+        if self.physical_prior_use_himawari16_from17 and src.shape[0] >= 17:
+            # Current 17ch layout: channel-0 is sun-angle; channels 1..16 are Himawari-8.
+            src = src[1:17]
+        if src.shape[0] < 16:
+            raise ValueError(
+                f"physical_prior expects at least 16 Himawari channels, got {src.shape[0]}"
+            )
+
+        # Configurable defaults (0-based) for Himawari-8-like ordering in 16-band cube:
+        # VIS/NIR: 0,1,2; WV: 7,8,9; IR window/split-window: 10,12,13.
+        vis = src[self._idx("vis", 0)]
+        nir = src[self._idx("nir", 2)]
+        swir = src[self._idx("swir", 3)]
+        wv1 = src[self._idx("wv1", 7)]
+        wv2 = src[self._idx("wv2", 8)]
+        wv3 = src[self._idx("wv3", 9)]
+        ir11 = src[self._idx("ir11", 10)]
+        ir12 = src[self._idx("ir12", 12)]
+        ir13 = src[self._idx("ir13", 13)]
+
+        eps = 1e-6
+        features = [
+            (vis - nir),                                  # visible/NIR contrast
+            (nir - swir),                                 # phase-sensitive reflectance contrast
+            (wv2 - wv1),                                  # upper-level moisture gradient proxy
+            (wv3 - wv2),                                  # mid-level moisture gradient proxy
+            (ir11 - ir12),                                # split-window BTD (thin cirrus discrimination)
+            (ir11 - ir13),                                # cloud-top/low-level contrast proxy
+            (wv2 - ir11),                                 # high-cloud signal proxy
+            ((ir11 - ir12) / (np.abs(ir11) + eps)).astype(np.float32),  # normalized split-window
+        ]
+        prior = np.stack([np.asarray(f, dtype=np.float32) for f in features], axis=0)
+        prior = self.physical_prior_normalizer(prior).numpy()
+        if self.physical_prior_include_inputs:
+            return np.concatenate([image, prior], axis=0)
+        return prior
 
     def __len__(self) -> int:
         if self.mmap_store is not None:
@@ -628,6 +687,7 @@ class CloudSegmentationDataset(Dataset):
         image = self.image_normalizer(image).numpy()
         image = self._select_input_channels(image)
         image = self._build_gradient_features(image)
+        image = self._build_himawari16_physical_prior(image)
         image = torch.from_numpy(image)
         mask = torch.from_numpy(mask.copy()).long()
         invalid = (mask < 0) | (mask >= self.num_classes)

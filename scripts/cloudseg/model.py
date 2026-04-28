@@ -230,6 +230,103 @@ class OfficialUNet(nn.Module):
         return logits
 
 
+class OfficialUNetHierarchical(nn.Module):
+    input_channels: int = 17
+    num_classes: int = 10
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool = True):
+        train = not deterministic
+
+        stage_1 = _DoubleConv(32, 64, 64, name="stage_1")(x, train=train)
+        stage_2 = nn.max_pool(stage_1, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_2 = _DoubleConv(128, 128, name="stage_2")(stage_2, train=train)
+
+        stage_3 = nn.max_pool(stage_2, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_3 = _DoubleConv(256, 256, name="stage_3")(stage_3, train=train)
+
+        stage_4 = nn.max_pool(stage_3, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_4 = _DoubleConv(512, 512, name="stage_4")(stage_4, train=train)
+
+        stage_5 = nn.max_pool(stage_4, window_shape=(2, 2), strides=(2, 2), padding="VALID")
+        stage_5 = _DoubleConv(1024, 1024, name="stage_5")(stage_5, train=train)
+
+        up_4 = nn.ConvTranspose(512, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_4")(stage_5)
+        up_4 = jnp.concatenate([up_4, stage_4], axis=-1)
+        up_4 = _DoubleConv(512, 512, name="stage_up_4")(up_4, train=train)
+
+        up_3 = nn.ConvTranspose(256, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_3")(up_4)
+        up_3 = jnp.concatenate([up_3, stage_3], axis=-1)
+        up_3 = _DoubleConv(256, 256, name="stage_up_3")(up_3, train=train)
+
+        up_2 = nn.ConvTranspose(128, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_2")(up_3)
+        up_2 = jnp.concatenate([up_2, stage_2], axis=-1)
+        up_2 = _DoubleConv(128, 128, name="stage_up_2")(up_2, train=train)
+
+        up_1 = nn.ConvTranspose(64, kernel_size=(4, 4), strides=(2, 2), padding="SAME", name="upsample_1")(up_2)
+        up_1 = jnp.concatenate([up_1, stage_1], axis=-1)
+        up_1 = _DoubleConv(64, 64, name="stage_up_1")(up_1, train=train)
+
+        # Level-1: clear/cloud (2 classes)
+        logits_l1 = nn.Conv(2, kernel_size=(3, 3), padding="SAME", name="head_l1")(up_1)
+        # Level-2 under cloud: high/middle/low/thick_or_vertical (4 groups)
+        logits_l2_cloud = nn.Conv(4, kernel_size=(3, 3), padding="SAME", name="head_l2_cloud")(up_1)
+        # Level-3 conditional heads per group
+        logits_high = nn.Conv(2, kernel_size=(3, 3), padding="SAME", name="head_l3_high")(up_1)  # Ci/Cs
+        logits_middle = nn.Conv(2, kernel_size=(3, 3), padding="SAME", name="head_l3_middle")(up_1)  # Ac/As
+        logits_low = nn.Conv(3, kernel_size=(3, 3), padding="SAME", name="head_l3_low")(up_1)  # Cu/Sc/St
+        logits_thick = nn.Conv(2, kernel_size=(3, 3), padding="SAME", name="head_l3_thick")(up_1)  # DC/Ns
+
+        log_p_l1 = jax.nn.log_softmax(logits_l1, axis=-1)
+        log_p_clear = log_p_l1[..., 0]
+        log_p_cloud = log_p_l1[..., 1]
+
+        log_p_l2_cloud = jax.nn.log_softmax(logits_l2_cloud, axis=-1)  # [high, middle, low, thick]
+        log_p_high = log_p_cloud + log_p_l2_cloud[..., 0]
+        log_p_middle = log_p_cloud + log_p_l2_cloud[..., 1]
+        log_p_low = log_p_cloud + log_p_l2_cloud[..., 2]
+        log_p_thick = log_p_cloud + log_p_l2_cloud[..., 3]
+
+        log_p_high_cls = jax.nn.log_softmax(logits_high, axis=-1)
+        log_p_middle_cls = jax.nn.log_softmax(logits_middle, axis=-1)
+        log_p_low_cls = jax.nn.log_softmax(logits_low, axis=-1)
+        log_p_thick_cls = jax.nn.log_softmax(logits_thick, axis=-1)
+
+        # Final 10-class order:
+        # 0:Clr, 1:Ci, 2:Cs, 3:DC, 4:Ac, 5:As, 6:Ns, 7:Cu, 8:Sc, 9:St
+        logits_l3 = jnp.stack(
+            [
+                log_p_clear,
+                log_p_high + log_p_high_cls[..., 0],      # Ci
+                log_p_high + log_p_high_cls[..., 1],      # Cs
+                log_p_thick + log_p_thick_cls[..., 0],    # DC
+                log_p_middle + log_p_middle_cls[..., 0],  # Ac
+                log_p_middle + log_p_middle_cls[..., 1],  # As
+                log_p_thick + log_p_thick_cls[..., 1],    # Ns
+                log_p_low + log_p_low_cls[..., 0],        # Cu
+                log_p_low + log_p_low_cls[..., 1],        # Sc
+                log_p_low + log_p_low_cls[..., 2],        # St
+            ],
+            axis=-1,
+        )
+
+        logits_l2 = jnp.stack(
+            [
+                log_p_clear,
+                log_p_high,
+                log_p_middle,
+                log_p_low,
+                log_p_thick,
+            ],
+            axis=-1,
+        )
+        return {
+            "logits_l1": logits_l1,
+            "logits_l2": logits_l2,
+            "logits_l3": logits_l3,
+        }
+
+
 class DriftingUNet(nn.Module):
     input_channels: int = 17
     num_classes: int = 10

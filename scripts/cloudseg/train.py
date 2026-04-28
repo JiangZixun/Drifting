@@ -22,7 +22,7 @@ from tqdm import tqdm
 from scripts.cloudseg.data import build_dataloaders
 from scripts.cloudseg.losses import cloudseg_loss
 from scripts.cloudseg.metrics import confusion_matrix, evaluate
-from scripts.cloudseg.model import CloudSegAdapter, OfficialUNet, default_backbone_config
+from scripts.cloudseg.model import CloudSegAdapter, OfficialUNet, OfficialUNetHierarchical, default_backbone_config
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.json"
@@ -184,6 +184,11 @@ def create_state(cfg, rng, sample_image_shape, steps_per_epoch: int):
             input_channels=sample_image_shape[-1],
             num_classes=cfg["num_classes"],
         )
+    elif model_type == "official_unet_hierarchical":
+        model = OfficialUNetHierarchical(
+            input_channels=sample_image_shape[-1],
+            num_classes=cfg["num_classes"],
+        )
     else:
         raise ValueError(f"Unsupported model.type={model_type!r}")
 
@@ -214,6 +219,12 @@ def train_step(
     focal_gamma,
     ce_weight,
     dice_weight,
+    hier_l1_weight,
+    hier_l2_weight,
+    confusion_pair_weight,
+    confusion_pairs,
+    confusion_pair_margin,
+    confusion_pair_weights,
     freeze_backbone,
 ):
     def loss_fn(params):
@@ -236,6 +247,12 @@ def train_step(
             focal_gamma=focal_gamma,
             ce_weight=ce_weight,
             dice_weight=dice_weight,
+            hier_l1_weight=hier_l1_weight,
+            hier_l2_weight=hier_l2_weight,
+            confusion_pair_weight=confusion_pair_weight,
+            confusion_pairs=confusion_pairs,
+            confusion_pair_margin=confusion_pair_margin,
+            confusion_pair_weights=confusion_pair_weights,
         )
         return loss, (metrics, logits, new_batch_stats)
 
@@ -246,7 +263,8 @@ def train_step(
     state = state.apply_gradients(grads=grads)
     if new_batch_stats is not None:
         state = state.replace(batch_stats=new_batch_stats)
-    preds = jnp.argmax(logits, axis=-1)
+    logits_for_pred = logits["logits_l3"] if isinstance(logits, dict) else logits
+    preds = jnp.argmax(logits_for_pred, axis=-1)
     return state, metrics, preds
 
 
@@ -267,13 +285,14 @@ def eval_step(
     if state.batch_stats is not None:
         variables["batch_stats"] = state.batch_stats
     logits = state.apply_fn(variables, images, deterministic=True)
-    preds = jnp.argmax(logits, axis=-1)
+    logits_for_pred = logits["logits_l3"] if isinstance(logits, dict) else logits
+    preds = jnp.argmax(logits_for_pred, axis=-1)
     return preds
 
 
 def run_train_epoch(loader, state, step_fn, *, split, cfg):
     conf_mat = np.zeros((cfg["num_classes"], cfg["num_classes"]), dtype=np.int64)
-    metric_sums = {"loss": 0.0, "loss_ce": 0.0, "loss_dice": 0.0}
+    metric_sums = {"loss": 0.0, "loss_ce": 0.0, "loss_dice": 0.0, "loss_pair": 0.0}
     count = 0
 
     iterator = tqdm(loader, desc=split, leave=True, dynamic_ncols=True, mininterval=0.5)
@@ -293,6 +312,12 @@ def run_train_epoch(loader, state, step_fn, *, split, cfg):
             focal_gamma=cfg["loss"].get("focal_gamma", 2.0),
             ce_weight=cfg["loss"].get("ce_weight", cfg["loss"].get("focal_weight", 0.5)),
             dice_weight=cfg["loss"].get("dice_weight", 0.5),
+            hier_l1_weight=cfg["loss"].get("hier_l1_weight", 0.2),
+            hier_l2_weight=cfg["loss"].get("hier_l2_weight", 0.3),
+            confusion_pair_weight=cfg["loss"].get("confusion_pair_weight", 0.0),
+            confusion_pairs=cfg["loss"].get("confusion_pairs", []),
+            confusion_pair_margin=cfg["loss"].get("confusion_pair_margin", 0.25),
+            confusion_pair_weights=cfg["loss"].get("confusion_pair_weights"),
             freeze_backbone=not cfg["train_backbone"],
         )
         preds_np = np.asarray(preds)
@@ -401,6 +426,8 @@ def main():
             "focal_gamma",
             "ce_weight",
             "dice_weight",
+            "hier_l1_weight",
+            "hier_l2_weight",
             "freeze_backbone",
         ),
     )

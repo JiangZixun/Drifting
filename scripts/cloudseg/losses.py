@@ -4,6 +4,38 @@ import jax
 import jax.numpy as jnp
 
 
+L1_CLASS_MAP = jnp.asarray([0, 1, 1, 1, 1, 1, 1, 1, 1, 1], dtype=jnp.int32)
+L2_CLASS_MAP = jnp.asarray([0, 1, 1, 4, 2, 2, 4, 3, 3, 3], dtype=jnp.int32)
+
+
+def _masked_cross_entropy_loss(
+    logits: jax.Array,
+    targets: jax.Array,
+    *,
+    num_classes: int,
+    ignore_index: int,
+) -> jax.Array:
+    valid_mask = targets != ignore_index
+    valid_targets = jnp.clip(targets, 0, num_classes - 1)
+    logits_flat = jnp.transpose(logits, (0, 2, 3, 1)).reshape(-1, num_classes)
+    targets_flat = valid_targets.reshape(-1)
+    valid_flat = valid_mask.reshape(-1).astype(jnp.float32)
+    log_probs = jax.nn.log_softmax(logits_flat, axis=-1)
+    ce = -jnp.take_along_axis(log_probs, targets_flat[:, None], axis=1).squeeze(-1)
+    ce = ce * valid_flat
+    return ce.sum() / (valid_flat.sum() + 1e-6)
+
+
+def _build_hier_targets(labels: jax.Array, ignore_index: int) -> tuple[jax.Array, jax.Array]:
+    valid = labels != ignore_index
+    labels_safe = jnp.clip(labels, 0, 9)
+    l1 = jnp.take(L1_CLASS_MAP, labels_safe, axis=0)
+    l2 = jnp.take(L2_CLASS_MAP, labels_safe, axis=0)
+    l1 = jnp.where(valid, l1, jnp.asarray(ignore_index, dtype=l1.dtype))
+    l2 = jnp.where(valid, l2, jnp.asarray(ignore_index, dtype=l2.dtype))
+    return l1.astype(jnp.int32), l2.astype(jnp.int32)
+
+
 def dice_loss(
     inputs: jax.Array,
     target: jax.Array,
@@ -101,8 +133,47 @@ def focal_loss(
     return loss.sum() / (valid_flat.sum() + 1e-6)
 
 
+def confusion_pair_margin_loss(
+    logits: jax.Array,
+    targets: jax.Array,
+    *,
+    confusion_pairs: list[list[int]] | tuple[tuple[int, int], ...],
+    margin: float = 0.25,
+    pair_weights: list[float] | tuple[float, ...] | None = None,
+    ignore_index: int = 10,
+) -> jax.Array:
+    if not confusion_pairs:
+        return jnp.asarray(0.0, dtype=jnp.float32)
+
+    if pair_weights is None:
+        pair_weights = [1.0] * len(confusion_pairs)
+    if len(pair_weights) != len(confusion_pairs):
+        raise ValueError("pair_weights length must match confusion_pairs length")
+
+    valid_mask = targets != ignore_index
+    total_loss = jnp.asarray(0.0, dtype=jnp.float32)
+    total_weight = jnp.asarray(0.0, dtype=jnp.float32)
+
+    for (a_idx, b_idx), pair_weight in zip(confusion_pairs, pair_weights):
+        a_logit = logits[:, a_idx, :, :]
+        b_logit = logits[:, b_idx, :, :]
+        label_is_a = jnp.logical_and(targets == a_idx, valid_mask)
+        label_is_b = jnp.logical_and(targets == b_idx, valid_mask)
+
+        # Enforce a margin between confusing pair logits on pixels belonging to either class.
+        loss_a = jnp.maximum(0.0, margin - (a_logit - b_logit)) * label_is_a.astype(jnp.float32)
+        loss_b = jnp.maximum(0.0, margin - (b_logit - a_logit)) * label_is_b.astype(jnp.float32)
+        pair_count = label_is_a.astype(jnp.float32).sum() + label_is_b.astype(jnp.float32).sum()
+        pair_loss = (loss_a.sum() + loss_b.sum()) / (pair_count + 1e-6)
+        w = jnp.asarray(pair_weight, dtype=jnp.float32)
+        total_loss = total_loss + w * pair_loss
+        total_weight = total_weight + w
+
+    return total_loss / (total_weight + 1e-6)
+
+
 def cloudseg_loss(
-    logits_bhwc: jax.Array,
+    logits_bhwc: jax.Array | dict[str, jax.Array],
     labels: jax.Array,
     *,
     num_classes: int,
@@ -113,8 +184,22 @@ def cloudseg_loss(
     focal_gamma: float = 2.0,
     ce_weight: float = 0.5,
     dice_weight: float = 0.5,
+    hier_l1_weight: float = 0.2,
+    hier_l2_weight: float = 0.3,
+    confusion_pair_weight: float = 0.0,
+    confusion_pairs: list[list[int]] | tuple[tuple[int, int], ...] | None = None,
+    confusion_pair_margin: float = 0.25,
+    confusion_pair_weights: list[float] | tuple[float, ...] | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    logits = jnp.transpose(logits_bhwc, (0, 3, 1, 2))
+    if isinstance(logits_bhwc, dict):
+        logits_l1 = jnp.transpose(logits_bhwc["logits_l1"], (0, 3, 1, 2))
+        logits_l2 = jnp.transpose(logits_bhwc["logits_l2"], (0, 3, 1, 2))
+        logits = jnp.transpose(logits_bhwc["logits_l3"], (0, 3, 1, 2))
+    else:
+        logits_l1 = None
+        logits_l2 = None
+        logits = jnp.transpose(logits_bhwc, (0, 3, 1, 2))
+
     if primary_loss == "focal":
         loss1 = focal_loss(
             logits,
@@ -142,10 +227,42 @@ def cloudseg_loss(
         softmax=True,
     )
     total = ce_weight * loss1 + dice_weight * loss2
+    loss_pair = confusion_pair_margin_loss(
+        logits,
+        labels,
+        confusion_pairs=confusion_pairs or (),
+        margin=confusion_pair_margin,
+        pair_weights=confusion_pair_weights,
+        ignore_index=ignore_index,
+    )
+    total = total + jnp.asarray(confusion_pair_weight, dtype=jnp.float32) * loss_pair
+
+    if logits_l1 is not None and logits_l2 is not None:
+        labels_l1, labels_l2 = _build_hier_targets(labels, ignore_index)
+        loss_l1 = _masked_cross_entropy_loss(
+            logits_l1,
+            labels_l1,
+            num_classes=2,
+            ignore_index=ignore_index,
+        )
+        loss_l2 = _masked_cross_entropy_loss(
+            logits_l2,
+            labels_l2,
+            num_classes=5,
+            ignore_index=ignore_index,
+        )
+        total = total + hier_l1_weight * loss_l1 + hier_l2_weight * loss_l2
+    else:
+        loss_l1 = jnp.asarray(0.0, dtype=jnp.float32)
+        loss_l2 = jnp.asarray(0.0, dtype=jnp.float32)
+
     metrics = {
         "loss": total,
         "loss_ce": loss1,
         "loss_dice": loss2,
+        "loss_pair": loss_pair,
+        "loss_l1": loss_l1,
+        "loss_l2": loss_l2,
     }
     if primary_loss == "focal":
         metrics["loss_focal"] = loss1
